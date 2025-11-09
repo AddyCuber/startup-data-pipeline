@@ -13,7 +13,7 @@ GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GENAI_API_KEY:
     genai.configure(api_key=GENAI_API_KEY)
-    MODEL = genai.GenerativeModel("gemini-1.5-flash")
+    MODEL = genai.GenerativeModel("models/gemini-2.5-flash")
 else:
     MODEL = None
 
@@ -107,7 +107,15 @@ def safe_parse_llm(context: str) -> Dict[str, Any]:
 
 def enrich_articles(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Take raw RSS articles → Output enriched structured funding data."""
+    if MODEL is None:
+        print(
+            "⚠️  GEMINI_API_KEY not set. Skipping LLM enrichment step. "
+            "Provide the key to enable structured parsing."
+        )
+        return []
+
     if not articles:
+        print("⚠️  No articles provided to enrichment.")
         return []
 
     enriched: List[Dict[str, Any]] = []
@@ -115,16 +123,19 @@ def enrich_articles(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for article in articles:
         body = fetch_article_text(article["url"])
         if not body:
+            print(f"⚠️  Skipping '{article['title']}' (no article text fetched)")
             continue
 
         context = f"TITLE: {article['title']}\nBODY: {body}"
 
         try:
             data = safe_parse_llm(context)
-        except Exception:
+        except Exception as exc:
+            print(f"⚠️  Enrichment failed for '{article['title']}': {exc}")
             continue
 
         if not data or not data.get("company_name"):
+            print(f"⚠️  No structured data extracted for '{article['title']}'")
             continue
 
         enriched.append({**article, **data})
