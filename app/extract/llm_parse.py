@@ -40,14 +40,14 @@ RULES:
 - Return no commentary, no explanations, no backticks.
 
 Required JSON Fields:
-{
+{{
   "company_name": string or null,
   "amount_raised_usd": integer or null,
   "funding_round": string or null,
   "investors": list of strings,
   "lead_investor": string or null,
   "headquarter_country": string or null
-}
+}}
 
 TEXT TO ANALYZE:
 {context}
