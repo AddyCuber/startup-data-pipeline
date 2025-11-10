@@ -1,5 +1,26 @@
+# Byte-compiled / optimized files
 __pycache__/
 *.py[cod]
-.DS_Store
+*$py.class
 
+# Virtual environments
+.env/
+.venv/
+venv/
+ENV/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local data artifacts
+/data/
+*.sqlite
+*.db
+
+# Secrets
 .env
+*.json

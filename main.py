@@ -1,42 +1,100 @@
-from app.extract.llm_parse import enrich_articles
+import requests
 from app.ingest.rss_ingest import fetch_recent_articles
+from app.extract.llm_parse import enrich_articles
 from app.resolve.domain_resolver import resolve_company_domain
+from app.hiring.detect_ats import detect_hiring_signal
+from app.store.upsert import upsert_company, init_db
+from app.publish.to_gsheet import save_to_sheet
 
 
-def format_row(company: str, amount: int | None, round_name: str | None, country: str | None, domain_info: dict) -> str:
-    amount_str = f"${amount}" if amount is not None else "N/A"
-    round_str = round_name or "N/A"
-    country_str = country or "N/A"
+def validate_url(url: str) -> bool:
+    """Returns True only if the website is reachable (status < 400)."""
+    if not url:
+        return False
+    try:
+        resp = requests.head(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+            allow_redirects=True,
+        )
+        return resp.status_code < 400
+    except requests.RequestException:
+        return False
 
-    domain = domain_info.get("domain") or "N/A"
-    confidence = domain_info.get("confidence")
-    conf_str = f" (conf={confidence:.2f})" if confidence else ""
 
-    return (
-        f"{company:<28} | {amount_str:<9} | "
-        f"{round_str:<9} | {country_str:<13} | {domain}{conf_str}"
-    )
+def run_pipeline():
+    """Orchestrates article ingest, enrichment, domain resolution, hiring signals, storage, and publishing."""
 
+    # --- STEP 0: Ensure DB exists before anything else ---
+    init_db()
 
-def main(days_back: int = 3, max_preview: int = 10) -> None:
-    articles = fetch_recent_articles(days_back=days_back)
-    print(f"Fetched {len(articles)} recent funding-related articles.\n")
+    print("\n=== STEP 1: Fetch Recent Funding Articles ===")
+    # Limit to 20 items to keep the run affordable; extend days_back as needed for production
+    articles = fetch_recent_articles(days_back=7)[:20]
+    print(f"→ Found {len(articles)} funding-related articles (processing max 20).\n")
+    if not articles:
+        print("✅ No new articles found. Pipeline complete.")
+        return []
 
+    print("\n=== STEP 2: Enrich Using LLM ===")
     enriched = enrich_articles(articles)
-    print(f"\nEnriched {len(enriched)} articles.\n")
+    print(f"\n→ Enriched {len(enriched)} with structured fields.\n")
+    if not enriched:
+        print("✅ No articles could be enriched. Pipeline complete.")
+        return []
 
-    rows = []
-    for article in enriched[:max_preview]:
-        company = article.get("company_name", "Unknown")
-        amount = article.get("amount_raised_usd")
-        round_name = article.get("funding_round")
-        country = article.get("headquarter_country")
+    print("\n=== STEP 3: Resolve Company Websites (LLM URL First, Fallback Otherwise) ===")
+    resolved = []
+    for item in enriched:
+        company = item.get("company_name")
+        if not company:
+            print("⚠️ Skipping item with no company name.")
+            continue
 
-        domain_info = resolve_company_domain(company)
-        rows.append(format_row(company, amount, round_name, country, domain_info))
+        llm_url = item.get("website_url")
+        if llm_url and validate_url(llm_url):
+            resolved_entry = {
+                "domain": llm_url,
+                "confidence": 0.98,
+                "source": "llm_explicit",
+            }
+        else:
+            resolved_entry = resolve_company_domain(company, item.get("url"))
 
-    print("\n".join(rows))
+        merged = {**item, **resolved_entry}
+        resolved.append(merged)
+
+        print(
+            f"{company:<28} | "
+            f"${merged.get('amount_raised_usd')} | "
+            f"{merged.get('funding_round')} | "
+            f"{merged.get('domain')}  "
+            f"(conf={merged.get('confidence'):.2f}, src={merged.get('source')})"
+        )
+
+    print("\n=== STEP 4 & 5: Hiring Signal and Storage ===")
+    final_output = []
+    for item in resolved:
+        hiring = detect_hiring_signal(item.get("domain"))
+        merged = {**item, **hiring}
+        final_output.append(merged)
+
+        print(
+            f"{merged['company_name']:<28} | "
+            f"Hiring Tier: {merged.get('hiring_tier')} | "
+            f"{merged.get('details')}"
+        )
+
+        upsert_company(merged)
+
+    print(f"\n✅ Pipeline completed. Total companies processed & stored: {len(final_output)}\n")
+
+    print("\n=== STEP 6: Publishing to Google Sheets ===")
+    save_to_sheet(final_output)
+
+    return final_output
 
 
 if __name__ == "__main__":
-    main()
+    run_pipeline()
