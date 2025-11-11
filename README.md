@@ -4,7 +4,7 @@ An automated data pipeline that discovers startups that have recently raised fun
 
 ### 📊 Live Demo Output
 
-(Insert your Google Sheet link here)
+https://docs.google.com/spreadsheets/d/1DmddsH39He3GXLs31ty-kTQznLH9t3fUb3VkqAlhSPg/edit?usp=sharing
 
 ---
 
@@ -200,6 +200,17 @@ CREATE TABLE IF NOT EXISTS funded_companies (
    - Validate Telegram creds: `python scripts/test_telegram_alert.py --message "Pipeline check"`  
    - Boot the pipeline: `python main.py`  
    - The first run seeds the SQLite DB (`data/companies.db`) and appends rows to your sheet.
+
+---
+
+### 📡 Rate Limits & Compliance
+
+- **Gemini 2.5 Flash (GCP)** – running on free credits. Quota is ~15 requests/minute and ~1,000 per day. Each execution processes ≤20 fresh articles, so we stay well below the cap. Usage is monitored through the GCP console.
+- **RSS feeds & press releases** – one polite HTTP request per source each run; no aggressive crawling.
+- **DuckDuckGo LinkedIn fallback** – optional and disabled by default (`ENABLE_LINKEDIN_FALLBACK`). When enabled it throttles to ≤1 query/sec and handles Bing/DDG timeouts gracefully.
+- **Google Sheets API** – default limit is ~60 requests/minute. We append ≤20 rows per execution.
+- **Telegram Bot API** – only a handful of alerts per run; non-200 responses are logged.
+- **No LinkedIn scraping** – to respect LinkedIn’s ToS we probe ATS APIs and careers pages instead. The “Crawl → Find → Probe” logic hits public job boards (Greenhouse, Lever, Ashby, etc.) or internal career pages to detect real openings.
 
 ---
 
