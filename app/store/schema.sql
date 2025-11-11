@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS funded_companies (
     hiring_tier TEXT,
     careers_url TEXT,
     ats_provider TEXT,
+    tech_roles INTEGER,
 
     -- Provenance + tracking
     source_url TEXT,

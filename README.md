@@ -1,107 +1,209 @@
-# Startup Funding & Hiring Signal Pipeline
+# Startup Signal Pipeline
 
-Automated system that discovers venture funding rounds, enriches each company with hiring intelligence, persists results for deduped history, and publishes fresh leads to Google Sheets for immediate outreach. Built as the technical assignment for **CodeRound AI**.
+An automated data pipeline that discovers startups that have recently raised funding and are actively hiring in tech roles. It fetches data from news feeds, enriches it with an LLM, finds each company’s careers page, and publishes qualified leads to Google Sheets while sending instant Telegram alerts.
 
-## Highlights
+### 📊 Live Demo Output
 
-- **Funding discovery:** Pulls high-signal press releases for the last _n_ days (default 7, configurable up to 30+) and normalises amounts, rounds, investors, and announcement dates via Gemini 2.5 Flash.
-- **Company enrichment:** Resolves official domains directly from the press article (before search/guessing) to avoid false positives, then captures source URLs for traceability.
-- **Hiring detection:** Identifies ATS links (Greenhouse, Lever, Ashby, Workable, BambooHR, etc.), scrapes role metadata, and grades companies into tiers (A recent tech hiring, B tech roles but older, C no active tech hiring).
-- **Persistence & dedupe:** Stores snapshots in `data/companies.db` (SQLite) with a uniqueness constraint on `(company_name, funding_round, announcement_date)` so re-runs update the latest data instead of duplicating rows.
-- **Go-to-market output:** Publishes every run to a Google Sheet (`Recently Funded Startups`) so sales/BD can act without touching the database.
-- **Extensible foundation:** Clean module boundaries (`app/ingest`, `app/extract`, `app/resolve`, `app/hiring`, `app/store`, `app/publish`) make it easy to add LinkedIn enrichment, Slack notifications, or Docker packaging later.
+(Insert your Google Sheet link here)
 
-## System Flow
+---
 
-1. **Fetch** funding news via curated RSS feeds.
-2. **Parse** each article with Gemini to extract structured JSON.
-3. **Resolve** domains using hyperlinks in the press release (fallback to DuckDuckGo + smart guessing).
-4. **Detect hiring** by scanning ATS boards or `/careers` pages for tech titles posted in the last 14 days.
-5. **Persist** into SQLite (dedupe on company/round/date) and append to Google Sheets.
-6. (Optional) Use the stored data to drive alerts/analytics.
+### 🏛️ High-Level Architecture
 
-## Setup
+The `run_pipeline()` orchestrator in `main.py` wires together six stages that run every time the job executes: ingest → enrich → resolve → hiring intelligence → persistence → publish.
 
-### Requirements
-
-- Python 3.10+
-- Google service account with Sheets API enabled
-- Gemini API key (Google AI Studio)
-
-### 1. Clone & install dependencies
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+```32:101:main.py
+print("\n=== STEP 1: Fetch Recent Funding Articles ===")
+all_articles = fetch_recent_articles(days_back=7)
+...
+save_to_sheet(final_output)
 ```
 
-### 2. Configure secrets
+1. **Ingest** new funding articles via RSS (`fetch_recent_articles`).
+2. **Pre-filter** out already-processed URLs with the DB-driven pre-flight check.
+3. **Enrich** the remaining articles with Gemini (`enrich_articles`).
+4. **Resolve** official company domains via LLM output → article crawl → DuckDuckGo → smart guessing.
+5. **Detect hiring signals** on careers pages, store tiered intelligence, and alert via Telegram.
+6. **Publish** the curated list to Google Sheets for the go-to-market team.
 
-1. **Gemini**: create an `.env` file in the repo root:
-   ```env
-   GEMINI_API_KEY=your-google-gemini-key
+---
+
+### 🧠 Key Design Decisions & Problems Solved
+
+#### 1. Efficiency & Cost: The “Pre-Flight Check”
+**Problem:** Calling the LLM on previously processed articles wasted time and money.  
+**Solution:** `main.py` now collects the last 7 days of URLs, then asks `check_articles_exist()` which ones are already in SQLite before it spends tokens. Only unseen URLs move forward, and we still cap each run at 20 items for safety.
+
+```32:58:main.py
+article_urls = [a.get("url") for a in all_articles if a.get("url")]
+existing_urls = check_articles_exist(article_urls)
+new_articles = [a for a in all_articles if a.get("url") not in existing_urls]
+```
+
+```42:66:app/store/upsert.py
+query = (
+    f"SELECT source_url FROM funded_companies "
+    f"WHERE source_url IN ({placeholders})"
+)
+...
+return {row[0] for row in cur.fetchall()}
+```
+
+#### 2. Reliability: LLM Extraction (vs. Brittle Regex)
+**Problem:** Headlines alone are inconsistent; regex melts down on phrases like “extends its Series A.”  
+**Solution:** We fetch the full article body, pass it with the headline into Gemini, and demand strict JSON. The prompt guards against hallucinations (e.g., “Do not infer website_url”) while the parser cleans any stray markdown fences.
+
+```37:126:app/extract/llm_parse.py
+PROMPT = """
+You are a precise financial data extraction model.
+Return ONLY valid JSON. No commentary.
+...
+"investors": list,
+"lead_investor": string or null,
+...
+"""
+...
+response = MODEL.generate_content(prompt_text)
+raw = response.text.strip().replace("```json", "").replace("```", "").strip()
+return json.loads(raw)
+```
+
+#### 3. Compliance & Signal Quality: ATS Probing (vs. LinkedIn Scraping)
+**Problem:** Scraping LinkedIn violates ToS and yields noisy results; we needed durable, legal signals.  
+**Solution:** `app/hiring/detect_ats.py` executes a “Crawl → Find → Probe” strategy. It first finds the careers link on the homepage, prioritizing known ATS hosts like Greenhouse and Lever, then calls their public JSON endpoints before falling back to internal pages.
+
+```90:118:app/hiring/detect_ats.py
+# Priority 1: direct link to known ATS
+for a in home.find_all("a", href=True):
+    ...
+    for pattern, provider in ATS_PATTERNS.items():
+        if pattern in host:
+            return {"url": abs_href, "provider": provider}
+# Priority 2: internal careers links
+...
+# Priority 3: text matches
+```
+
+```120:197:app/hiring/detect_ats.py
+api = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+resp = _safe_get(api)
+...
+return fetch_internal_jobs(careers_url)
+```
+
+#### 4. Accuracy: Eliminating “Hiring Hallucinations”
+**Problem:** Our first pass counted keywords anywhere on the site, confusing “Meet the Team” pages for job boards.  
+**Solution:** After probing the careers endpoint, we parse structured job data (JSON-LD, API payloads) and classify tech roles explicitly. Tiering depends on recency via `RECENT_DAYS`, not raw counts, preventing stale listings from triggering Tier A.
+
+```23:78:app/hiring/detect_ats.py
+TECH_TITLE_KEYWORDS = {...}
+RECENT_DAYS = 14
+...
+def _is_tech_title(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in TECH_TITLE_KEYWORDS)
+```
+
+```302:336:app/hiring/detect_ats.py
+recent_cutoff = _now_utc() - timedelta(days=RECENT_DAYS)
+recent_jobs = [j for j in tech_jobs if j.get("posted_dt") and j["posted_dt"] >= recent_cutoff]
+...
+return {
+    "hiring_tier": tier,
+    "careers_url": careers_url,
+    "ats_provider": provider,
+    "tech_roles": tech_roles,
+    "details": details,
+}
+```
+
+#### 5. Coverage: Multi-Stage Domain Resolution
+**Problem:** New startups often lack obvious domains; simple guesses (“company.com”) fail on names like Fastbreak AI.  
+**Solution:** `resolve_company_domain()` falls back gracefully: trust the LLM-extracted URL when we have it, crawl the press release for outbound links, search DuckDuckGo for “Company official site,” then smart-guess high-signal TLDs while stripping legal suffixes.
+
+```64:168:app/resolve/domain_resolver.py
+def resolve_from_press_release(article_url: str):
+    ...
+    if clean:
+        return clean, 0.92
+...
+def resolve_company_domain(company_name: str, article_url: str):
+    domain, conf = resolve_from_press_release(article_url)
+    if domain:
+        return {"domain": domain, "confidence": conf, "source": "press_release"}
+    domain, conf = resolve_via_duckduckgo(company_name)
+    ...
+    domain, conf = resolve_via_guessing(company_name)
+```
+
+#### 6. Data Integrity: Correct Deduplication
+**Problem:** A simple `UNIQUE(company_name)` fails when the same startup raises multiple rounds.  
+**Solution:** The schema defines `UNIQUE(company_name, funding_round, announcement_date)` and `upsert_company()` honors it. We store every funding event separately while still preventing true duplicates.
+
+```77:104:app/store/upsert.py
+INSERT INTO funded_companies (
+    ...
+    tech_roles,
+    source_url,
+    last_seen
+)
+...
+ON CONFLICT(company_name, funding_round, announcement_date)
+DO UPDATE SET
+    amount_raised_usd = COALESCE(...)
+```
+
+```1:26:app/store/schema.sql
+CREATE TABLE IF NOT EXISTS funded_companies (
+    ...
+    UNIQUE(company_name, funding_round, announcement_date)
+);
+```
+
+---
+
+### 🛠️ Tech Stack
+
+- Python 3.x with `requests`, `BeautifulSoup`, `gspread`, `google-generativeai`, and `sqlite3`
+- Gemini LLM for structured enrichment
+- SQLite for lightweight persistence
+- Google Sheets + Telegram Bot API for outbound publishing
+- GitHub Actions (`.github/workflows/run.yml`) for scheduled, serverless execution
+
+---
+
+### 🔧 Local Setup
+
+1. **Clone & create a virtual environment**
+   ```bash
+   git clone <repo-url>
+   cd startup-signal-pipeline
+   python3 -m venv .venv
+   source .venv/bin/activate
    ```
-   _(Optional) If you plan to use the OpenAI test helper, add `OPENAI_API_KEY=...` as well._
 
-2. **Google Sheets credentials**:
-   - Download your service-account JSON and save it as `gen-lang-client-0811071215-3e0f9f2c4083.json` in the repo root (match the filename or adjust `app/publish/to_gsheet.py`).
-   - Share the target Sheet (`Recently Funded Startups`) with the service-account email.
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### 3. (Optional) Sanity check API keys
+3. **Configure environment variables**  
+   Copy `.env.example` (or create `.env`) with:
+   - `GEMINI_API_KEY` for enrichment  
+   - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for alerts  
+   - `OPENAI_API_KEY` (optional if you test alternative models)
 
-```bash
-python scripts/test_openai_key.py   # requires OPENAI_API_KEY
-```
+4. **Google Sheets credentials**
+   - Place your service-account JSON at the repo root as `google_creds.json`, or set `GOOGLE_CREDS_JSON` to another filename referenced in `app/publish/to_gsheet.py`.
 
-## Running the Pipeline
+5. **Run a smoke test**
+   - Validate Telegram creds: `python scripts/test_telegram_alert.py --message "Pipeline check"`  
+   - Boot the pipeline: `python main.py`  
+   - The first run seeds the SQLite DB (`data/companies.db`) and appends rows to your sheet.
 
-```bash
-python main.py
-```
+---
 
-What happens:
+### ☁️ Automation & Deployment
 
-- Logs progress for each step (fetch → enrich → resolve → hiring → DB → Sheets).
-- Writes/updates `data/companies.db` with deduped company rows.
-- Appends the latest run to the Google Sheet so go-to-market teams can work off it immediately.
+A lightweight GitHub Actions workflow (`.github/workflows/run.yml`) keeps the system serverless: it checks out the repo on a schedule, sets up Python, installs dependencies, and runs `python main.py`. Secrets (LLM keys, Telegram token, Google credentials) are injected from GitHub Repository Secrets, so no credentials live in the workflow definition. Logs capture each stage’s timing, and because the pipeline is fully stateful, repeated runs stay inexpensive—GitHub only pays for new articles while the workflow itself remains container-free (no Docker required).
 
-### Inspecting results
-
-```bash
-# Show total stored rows
-sqlite3 data/companies.db 'SELECT COUNT(*) FROM funded_companies;'
-
-# Peek at the most recent companies
-sqlite3 data/companies.db "SELECT company_name, amount_raised_usd, hiring_tier, last_seen FROM funded_companies ORDER BY last_seen DESC LIMIT 10;"
-```
-
-## Configuration & Tuning
-
-- **`days_back` / max leads**: adjust `fetch_recent_articles(days_back=7)[:20]` in `main.py` to widen the time window or increase throughput.
-- **Hiring recency window**: tweak `RECENT_DAYS` in `app/hiring/detect_ats.py` (defaults to 14 days).
-- **Supported ATS providers**: see `ATS_PATTERNS` inside `detect_ats.py` to add/remove vendors.
-- **Prompt controls**: the enrichment prompt lives in `app/extract/llm_parse.py`; guardrails ensure Gemini returns clean JSON even when articles are noisy.
-
-## Rate Limits & Cost Considerations
-
-- **Gemini 2.5 Flash**: lightweight but still billed per token—limiting to 20 articles per run keeps cost low. Increase gradually and monitor usage in Google AI Studio.
-- **Hiring detectors**: Uses public ATS APIs or HTML scraping; we include polite timeouts and minimal concurrency to avoid hammering vendor sites.
-- **Google Sheets**: `append_rows` batches updates to stay within quota.
-
-## Roadmap / Future Enhancements
-
-- Slack or email alerts when a company transitions into Hiring Tier A/B.
-- LinkedIn + key decision maker enrichment (Clearbit, People Data Labs, etc.).
-- Docker/`docker-compose` packaging for one-command deployment (web + scheduler).
-- Additional data sources (Crunchbase/Tracxn API) when licence keys are available.
-- UI/dashboard to visualise funding + hiring trends.
-
-## Submission Checklist for CodeRound AI
-
-- ✅ GitHub repo with full source, history, and instructions.
-- ✅ README covering setup, design decisions, rate-limit considerations, and next steps.
-- ✅ Google Sheet showing real output ready for sales outreach.
-- ⏳ Add screen-recorded demo walking through the pipeline (per assignment instructions).
-
-Feel free to reach out if you need help adjusting the footprint, adding alerting, or preparing the demo.

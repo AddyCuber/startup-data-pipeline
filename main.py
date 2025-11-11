@@ -3,9 +3,9 @@ from app.ingest.rss_ingest import fetch_recent_articles
 from app.extract.llm_parse import enrich_articles
 from app.resolve.domain_resolver import resolve_company_domain
 from app.hiring.detect_ats import detect_hiring_signal
-from app.store.upsert import upsert_company, init_db
+from app.store.upsert import upsert_company, init_db, check_articles_exist
 from app.publish.to_gsheet import save_to_sheet
-
+from app.publish.telegram_alerts import send_telegram_alert  # <-- ADDED
 
 def validate_url(url: str) -> bool:
     """Returns True only if the website is reachable (status < 400)."""
@@ -24,18 +24,33 @@ def validate_url(url: str) -> bool:
 
 
 def run_pipeline():
-    """Orchestrates article ingest, enrichment, domain resolution, hiring signals, storage, and publishing."""
+    """Orchestrates all steps: Ingest, Enrich, Resolve, Detect, Store, and Publish."""
 
     # --- STEP 0: Ensure DB exists before anything else ---
     init_db()
 
     print("\n=== STEP 1: Fetch Recent Funding Articles ===")
-    # Limit to 20 items to keep the run affordable; extend days_back as needed for production
-    articles = fetch_recent_articles(days_back=7)[:20]
-    print(f"→ Found {len(articles)} funding-related articles (processing max 20).\n")
-    if not articles:
+    all_articles = fetch_recent_articles(days_back=7)
+    print(f"→ Found {len(all_articles)} funding-related articles (pre-filter).\n")
+    if not all_articles:
         print("✅ No new articles found. Pipeline complete.")
         return []
+
+    # --- PRE-FLIGHT DUPLICATE FILTER ---
+    print("--- PRE-FLIGHT CHECK: Filtering already-processed articles ---")
+    article_urls = [a.get("url") for a in all_articles if a.get("url")]
+    existing_urls = check_articles_exist(article_urls)
+    new_articles = [a for a in all_articles if a.get("url") not in existing_urls]
+    print(f"→ {len(new_articles)} new articles to process.")
+    print(f"→ Skipped {len(existing_urls)} articles already stored.\n")
+    if not new_articles:
+        print("✅ No unseen articles. Pipeline complete.")
+        return []
+
+    # Safety limit: process at most 20 new articles per run
+    articles = new_articles[:20]
+    if len(new_articles) > len(articles):
+        print(f"⚠️ Truncating to {len(articles)} newest items due to safety limit.\n")
 
     print("\n=== STEP 2: Enrich Using LLM ===")
     enriched = enrich_articles(articles)
@@ -55,11 +70,10 @@ def run_pipeline():
         llm_url = item.get("website_url")
         if llm_url and validate_url(llm_url):
             resolved_entry = {
-                "domain": llm_url,
-                "confidence": 0.98,
-                "source": "llm_explicit",
+                "domain": llm_url, "confidence": 0.98, "source": "llm_explicit",
             }
         else:
+            # Pass original article URL for better DDG context if needed
             resolved_entry = resolve_company_domain(company, item.get("url"))
 
         merged = {**item, **resolved_entry}
@@ -73,7 +87,7 @@ def run_pipeline():
             f"(conf={merged.get('confidence'):.2f}, src={merged.get('source')})"
         )
 
-    print("\n=== STEP 4 & 5: Hiring Signal and Storage ===")
+    print("\n=== STEP 4 & 5: Hiring Signal, Storage, and Alerts ===")
     final_output = []
     for item in resolved:
         hiring = detect_hiring_signal(item.get("domain"))
@@ -85,8 +99,17 @@ def run_pipeline():
             f"Hiring Tier: {merged.get('hiring_tier')} | "
             f"{merged.get('details')}"
         )
-
+        
+        # --- STEP 5: Store in DB ---
         upsert_company(merged)
+
+        # --- REAL-TIME TELEGRAM ALERT ---
+        tier = merged.get("hiring_tier")
+        if tier in {"A", "B"}:
+            print(
+                f"    🔔 Tier {tier} lead found! Sending Telegram alert for {merged['company_name']}"
+            )
+            send_telegram_alert(merged) # <-- ADDED
 
     print(f"\n✅ Pipeline completed. Total companies processed & stored: {len(final_output)}\n")
 

@@ -1,5 +1,4 @@
 import json
-import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +39,32 @@ def init_db() -> None:
         raise
 
 
+def check_articles_exist(article_urls: list[str]) -> set[str]:
+    """
+    Given a list of article/source URLs, return the subset already stored.
+    """
+    if not article_urls:
+        return set()
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    placeholders = ",".join(["?"] * len(article_urls))
+    query = (
+        f"SELECT source_url FROM funded_companies "
+        f"WHERE source_url IN ({placeholders})"
+    )
+
+    try:
+        cur.execute(query, article_urls)
+        return {row[0] for row in cur.fetchall()}
+    except Exception as exc:
+        print(f"❌ DB Check Error: {exc}")
+        return set()
+    finally:
+        conn.close()
+
+
 def upsert_company(data: dict) -> None:
     """Insert or update a company's funding + hiring snapshot."""
     conn = get_connection()
@@ -61,10 +86,11 @@ def upsert_company(data: dict) -> None:
         hiring_tier,
         careers_url,
         ats_provider,
+        tech_roles,
         source_url,
         last_seen
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_name, funding_round, announcement_date)
     DO UPDATE SET
         amount_raised_usd = COALESCE(excluded.amount_raised_usd, amount_raised_usd),
@@ -74,6 +100,7 @@ def upsert_company(data: dict) -> None:
         hiring_tier      = excluded.hiring_tier,
         careers_url      = excluded.careers_url,
         ats_provider     = excluded.ats_provider,
+        tech_roles       = COALESCE(excluded.tech_roles,       tech_roles),
         last_seen        = excluded.last_seen;
     """
 
@@ -89,6 +116,7 @@ def upsert_company(data: dict) -> None:
         data.get("hiring_tier"),
         data.get("careers_url"),
         data.get("ats_provider"),
+        data.get("tech_roles"),
         data.get("source_url") or data.get("url"),
         datetime.now(timezone.utc).isoformat(),
     )
@@ -97,9 +125,9 @@ def upsert_company(data: dict) -> None:
         cur.execute(sql, params)
         conn.commit()
         print(f"📝 Upserted {data.get('company_name')} (rowcount={cur.rowcount})")
-        print("   params:", params)
     except Exception as exc:
         print(f"❌ DB Upsert Error ({data.get('company_name')}): {exc}")
+        print("   params:", params)
     finally:
         conn.close()
 
@@ -108,5 +136,6 @@ __all__ = [
     "get_connection",
     "init_db",
     "upsert_company",
+    "check_articles_exist",
     "DB_PATH",
 ]

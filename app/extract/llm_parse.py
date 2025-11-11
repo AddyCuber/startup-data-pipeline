@@ -1,29 +1,37 @@
-import json
 import os
-from typing import Any, Dict, List, Optional
-
-import google.generativeai as genai
+import json
 import requests
 from bs4 import BeautifulSoup
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
 
-GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if GENAI_API_KEY:
-    genai.configure(api_key=GENAI_API_KEY)
-    MODEL = genai.GenerativeModel("models/gemini-2.5-flash")
-else:
-    MODEL = None
-
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+MODEL = genai.GenerativeModel("models/gemini-2.5-flash")
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
+    "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+def fetch_article_text(url: str, max_len: int = 3000) -> str:
+    """
+    Fetch article content and extract readable text.
+    We limit length to reduce LLM token usage and rate-limits.
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.content, "html.parser")
+        paragraphs = soup.find_all("p")
+        text = " ".join(p.get_text(strip=True) for p in paragraphs)
+        return text[:max_len]
+    except:
+        return ""
+
 
 PROMPT = """
 You are a precise financial data extraction model. 
@@ -31,17 +39,20 @@ Your task is to read the funding news text and return a JSON object ONLY.
 
 RULES:
 - Do not guess. If a value is not clearly stated, return null.
-- Amounts must be converted to an integer USD value.
+- Extract website_url ONLY if explicitly mentioned in the text (e.g., hyperlinks, press release contact footer, "Visit: https://..."). Do NOT infer or invent one.
+- Convert funding amounts to integer USD values.
   Examples:
     "$5M" → 5000000
-    "₹20 Cr" → ~2400000 (approx, but do convert)
+    "₹20 Cr" → ~2400000 (approximate conversion acceptable)
     "€2.3M" → convert to USD using rough rate (1 EUR ≈ 1.1 USD)
-- Investors must be a list of strings. If none mentioned, return [].
-- Return no commentary, no explanations, no backticks.
+- Investors must be a list of strings.
+- No commentary. No backticks.
 
-Required JSON Fields:
+Return JSON exactly in this structure:
+
 {{
   "company_name": string or null,
+  "website_url": string or null,
   "amount_raised_usd": integer or null,
   "funding_round": string or null,
   "investors": list of strings,
@@ -53,91 +64,74 @@ TEXT TO ANALYZE:
 {context}
 """
 
-
-def fetch_article_text(url: str, max_len: int = 3000) -> str:
-    """Fetch article content and extract readable text."""
+def safe_parse_llm(context: str) -> dict:
+    """Call Gemini and robustly parse JSON output."""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-    except Exception:
-        return ""
+        prompt_text = PROMPT.format(context=context)
 
-    soup = BeautifulSoup(response.content, "html.parser")
-    paragraphs = soup.find_all("p")
-    text = " ".join(p.get_text(strip=True) for p in paragraphs)
-    return text[:max_len]
+        if len(prompt_text) < 200:
+            print("⚠️ DEBUG: Prompt too short — likely empty article body!")
 
+        response = MODEL.generate_content(prompt_text)
+        raw = getattr(response, "text", "").strip() or response.candidates[0].content.parts[0].text.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
 
-def _clean_json_output(raw_text: str) -> Optional[Dict[str, Any]]:
-    """Attempt to coerce the LLM output into valid JSON."""
-    cleaned = (
-        raw_text.replace("```json", "")
-        .replace("```", "")
-        .replace(",}", "}")
-        .replace(", ]", "]")
-        .strip()
-    )
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("{"):
+            stripped = "{" + stripped
+        if stripped and not stripped.endswith("}"):
+            stripped = stripped + "}"
+        raw = stripped
 
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as parse_err:
+            print(f"⚠️ DEBUG: JSON decode error {parse_err}. Raw response: {raw}")
+            raw = raw.replace(",}", "}").replace(", ]", "]")
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as parse_err_2:
+                print(f"⚠️ DEBUG: Second decode error {parse_err_2}. Raw response after cleanup: {raw}")
+                return {}
 
-
-def safe_parse_llm(context: str) -> Dict[str, Any]:
-    """Call Gemini Flash and safely parse JSON output."""
-    if MODEL is None:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not configured. "
-            "Set it in your environment before running enrichment."
-        )
-
-    try:
-        response = MODEL.generate_content(PROMPT.format(context=context))
-        text = response.candidates[0].content.parts[0].text.strip()
     except Exception as exc:
-        raise RuntimeError(f"Gemini content generation failed: {exc}") from exc
-
-    parsed = _clean_json_output(text)
-    if parsed is None:
-        raise ValueError("Unable to parse LLM output as JSON.")
-
-    return parsed
+        print(f"⚠️ LLM call failed: {exc}")
+        return {}
 
 
-def enrich_articles(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Take raw RSS articles → Output enriched structured funding data."""
-    if MODEL is None:
-        print(
-            "⚠️  GEMINI_API_KEY not set. Skipping LLM enrichment step. "
-            "Provide the key to enable structured parsing."
-        )
+def enrich_articles(articles: list) -> list:
+    """
+    Takes RSS articles → extracts structured funding data via the LLM.
+    """
+    if not os.getenv("GEMINI_API_KEY"):
+        print("⚠️ GEMINI_API_KEY missing — skipping LLM enrichment.")
         return []
 
     if not articles:
-        print("⚠️  No articles provided to enrichment.")
+        print("⚠️ No articles to enrich.")
         return []
 
-    enriched: List[Dict[str, Any]] = []
+    enriched = []
+    print(f"\n🔍 Extracting structured funding details for {len(articles)} articles...\n")
 
     for article in articles:
         body = fetch_article_text(article["url"])
         if not body:
-            print(f"⚠️  Skipping '{article['title']}' (no article text fetched)")
+            print(f"⚠️ Skipped (no article text): {article['title']}")
             continue
 
         context = f"TITLE: {article['title']}\nBODY: {body}"
 
-        try:
-            data = safe_parse_llm(context)
-        except Exception as exc:
-            print(f"⚠️  Enrichment failed for '{article['title']}': {exc}")
-            continue
-
+        data = safe_parse_llm(context)
         if not data or not data.get("company_name"):
-            print(f"⚠️  No structured data extracted for '{article['title']}'")
+            print(f"⚠️ No data extracted → {article['title']}")
             continue
 
-        enriched.append({**article, **data})
+        merged = {**article, **data}
+        enriched.append(merged)
 
+        print(f"✅ {merged['company_name']} — ${merged.get('amount_raised_usd')} ({merged.get('funding_round')})")
+
+    print(f"\n✅ Enriched {len(enriched)} articles.\n")
     return enriched
+
