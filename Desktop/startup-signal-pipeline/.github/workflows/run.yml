@@ -1,0 +1,68 @@
+# .github/workflows/run.yml
+
+name: Run Startup Signal Pipeline
+
+# 1. WHEN TO RUN
+on:
+  # (A) Run automatically every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'
+  
+  # (B) Allow you to run it manually from the "Actions" tab
+  workflow_dispatch:
+
+# 2. WHAT TO DO
+jobs:
+  build-and-run:
+    # Use a standard, free virtual computer
+    runs-on: ubuntu-latest
+    
+    # Give read/write permissions for committing the DB
+    permissions:
+      contents: write
+
+    steps:
+      # Step 1: "Get my code"
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      # Step 2: "Set up Python"
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip' # Speeds up future runs
+
+      # Step 3: "Install my libraries"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Step 4: "Create the secret .env file"
+      - name: Create .env file
+        run: |
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
+          echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> .env
+          echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> .env
+          echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> .env
+          echo "GOOGLE_SHEET_NAME=${{ secrets.GOOGLE_SHEET_NAME }}" >> .env
+
+      # Step 5: "Create the secret google_creds.json file"
+      - name: Create Google credentials file
+        run: |
+          printf '%s' "${{ secrets.GOOGLE_CREDS_JSON }}" > google_creds.json
+
+      # Step 6: "RUN THE SCRIPT!"
+      - name: Run pipeline
+        run: python3 main.py
+
+      # Step 7: "Save the updated database"
+      # This commits the .db file back to your repo so the
+      # "pre-flight check" works on the next run.
+      - name: Commit database changes
+        run: |
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'github-actions@github.com'
+          git add data/companies.db
+          # "|| echo" prevents an error if there are no changes
+          git commit -m "Update database [skip ci]" || echo "No changes to commit"
+          git push

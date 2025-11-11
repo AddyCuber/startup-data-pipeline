@@ -3,7 +3,7 @@ from app.ingest.rss_ingest import fetch_recent_articles
 from app.extract.llm_parse import enrich_articles
 from app.resolve.domain_resolver import resolve_company_domain
 from app.hiring.detect_ats import detect_hiring_signal
-from app.store.upsert import upsert_company, init_db
+from app.store.upsert import upsert_company, init_db, check_articles_exist
 from app.publish.to_gsheet import save_to_sheet
 from app.publish.telegram_alerts import send_telegram_alert  # <-- ADDED
 
@@ -30,11 +30,27 @@ def run_pipeline():
     init_db()
 
     print("\n=== STEP 1: Fetch Recent Funding Articles ===")
-    articles = fetch_recent_articles(days_back=7)[:20] # Safety limit
-    print(f"→ Found {len(articles)} funding-related articles (processing max 20).\n")
-    if not articles:
+    all_articles = fetch_recent_articles(days_back=7)
+    print(f"→ Found {len(all_articles)} funding-related articles (pre-filter).\n")
+    if not all_articles:
         print("✅ No new articles found. Pipeline complete.")
         return []
+
+    # --- PRE-FLIGHT DUPLICATE FILTER ---
+    print("--- PRE-FLIGHT CHECK: Filtering already-processed articles ---")
+    article_urls = [a.get("url") for a in all_articles if a.get("url")]
+    existing_urls = check_articles_exist(article_urls)
+    new_articles = [a for a in all_articles if a.get("url") not in existing_urls]
+    print(f"→ {len(new_articles)} new articles to process.")
+    print(f"→ Skipped {len(existing_urls)} articles already stored.\n")
+    if not new_articles:
+        print("✅ No unseen articles. Pipeline complete.")
+        return []
+
+    # Safety limit: process at most 20 new articles per run
+    articles = new_articles[:20]
+    if len(new_articles) > len(articles):
+        print(f"⚠️ Truncating to {len(articles)} newest items due to safety limit.\n")
 
     print("\n=== STEP 2: Enrich Using LLM ===")
     enriched = enrich_articles(articles)
