@@ -19,11 +19,31 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Initialise the SQLite database if it does not already exist."""
+    """Ensure the SQLite database exists and apply lightweight migrations."""
     if DB_PATH.exists():
-        return
+        conn = get_connection()
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(funded_companies)")}
+        except sqlite3.OperationalError:
+            conn.close()
+        else:
+            migrations_applied = False
+            if "linkedin_url" not in columns:
+                print("🔧 Migrating DB: adding linkedin_url column...")
+                conn.execute("ALTER TABLE funded_companies ADD COLUMN linkedin_url TEXT")
+                migrations_applied = True
+            if "tech_roles" not in columns:
+                print("🔧 Migrating DB: adding tech_roles column...")
+                conn.execute("ALTER TABLE funded_companies ADD COLUMN tech_roles INTEGER DEFAULT 0")
+                migrations_applied = True
+            if migrations_applied:
+                conn.commit()
+                print("✅ Schema migration applied.")
+            conn.close()
+            return
+        # If we reach here, the DB exists but table is missing/corrupt -> rebuild below.
 
-    print(f"🗃️  No DB found. Initialising new database at {DB_PATH}...")
+    print(f"🗃️  Initialising database at {DB_PATH}...")
 
     try:
         schema = SCHEMA_PATH.read_text()
@@ -31,7 +51,7 @@ def init_db() -> None:
         conn.executescript(schema)
         conn.commit()
         conn.close()
-        print("✅ Database schema created successfully.")
+        print("✅ Database schema ensured.")
     except Exception as exc:
         print(f"❌ Database initialization failed: {exc}")
         if DB_PATH.exists():
@@ -77,6 +97,7 @@ def upsert_company(data: dict) -> None:
     INSERT INTO funded_companies (
         company_name,
         website_url,
+        linkedin_url,
         amount_raised_usd,
         funding_round,
         investors,
@@ -84,29 +105,35 @@ def upsert_company(data: dict) -> None:
         headquarter_country,
         announcement_date,
         hiring_tier,
+        tech_roles,
         careers_url,
         ats_provider,
-        tech_roles,
         source_url,
         last_seen
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(company_name, funding_round, announcement_date)
     DO UPDATE SET
         amount_raised_usd = COALESCE(excluded.amount_raised_usd, amount_raised_usd),
         website_url      = COALESCE(excluded.website_url,      website_url),
+        linkedin_url     = COALESCE(excluded.linkedin_url,     linkedin_url),
         investors        = excluded.investors,
         lead_investor    = COALESCE(excluded.lead_investor,    lead_investor),
         hiring_tier      = excluded.hiring_tier,
+        tech_roles       = COALESCE(excluded.tech_roles,       tech_roles),
         careers_url      = excluded.careers_url,
         ats_provider     = excluded.ats_provider,
-        tech_roles       = COALESCE(excluded.tech_roles,       tech_roles),
         last_seen        = excluded.last_seen;
     """
+
+    tech_roles_value = data.get("tech_roles")
+    if tech_roles_value is None:
+        tech_roles_value = 0
 
     params = (
         data.get("company_name"),
         data.get("domain") or data.get("website_url"),
+        data.get("linkedin_url"),
         data.get("amount_raised_usd"),
         data.get("funding_round"),
         investors_json,
@@ -114,9 +141,9 @@ def upsert_company(data: dict) -> None:
         data.get("headquarter_country"),
         announcement_date,
         data.get("hiring_tier"),
+        tech_roles_value,
         data.get("careers_url"),
         data.get("ats_provider"),
-        data.get("tech_roles"),
         data.get("source_url") or data.get("url"),
         datetime.now(timezone.utc).isoformat(),
     )

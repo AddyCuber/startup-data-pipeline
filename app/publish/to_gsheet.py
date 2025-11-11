@@ -44,7 +44,7 @@ def init_sheet(client: gspread.client.Client):
         return None
 
     headers = [
-        "Company", "Domain", "Amount (USD)", "Round", "Investors",
+        "Company", "Domain", "LinkedIn", "Amount (USD)", "Round", "Investors",
         "Lead Investor", "Country", "Date Announced", "Hiring Tier", 
         "Tech Roles", "ATS Provider", "Careers URL", "Source URL", "Last Updated",
     ]
@@ -59,7 +59,7 @@ def init_sheet(client: gspread.client.Client):
 
     if not first_row or first_row[0].strip() != headers[0]:
         print("Header row not found in Google Sheet. Updating header row...")
-        sheet.update("A1:N1", [headers])
+        sheet.update("A1:O1", [headers])
         try:
             sheet.format("A1:N1", {"textFormat": {"bold": True}})
         except Exception:
@@ -95,6 +95,7 @@ def save_to_sheet(data_list: List[dict]) -> None:
         rows.append([
             item.get("company_name"),
             item.get("domain") or item.get("website_url"),
+            item.get("linkedin_url"),
             item.get("amount_raised_usd"),
             item.get("funding_round"),
             investors_str,

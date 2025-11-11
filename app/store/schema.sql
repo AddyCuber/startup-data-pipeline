@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS funded_companies (
     -- Core company & funding data
     company_name TEXT NOT NULL,
     website_url TEXT,
+    linkedin_url TEXT,
     amount_raised_usd INTEGER,
     funding_round TEXT,
     investors TEXT,
@@ -13,9 +14,9 @@ CREATE TABLE IF NOT EXISTS funded_companies (
 
     -- Hiring signal enrichment
     hiring_tier TEXT,
+    tech_roles INTEGER DEFAULT 0,
     careers_url TEXT,
     ats_provider TEXT,
-    tech_roles INTEGER,
 
     -- Provenance + tracking
     source_url TEXT,
