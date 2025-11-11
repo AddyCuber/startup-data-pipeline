@@ -72,7 +72,7 @@ def safe_parse_llm(context: str) -> dict:
     Uses new stable `.text` field (no `.candidates`).
     """
     try:
-        prompt_text = PROMPT.format(context=context)
+        prompt_text = PROMPT.replace("{context}", context)
         response = MODEL.generate_content(prompt_text)
 
         raw = response.text.strip()
@@ -81,6 +81,10 @@ def safe_parse_llm(context: str) -> dict:
         # JSON boundary cleanup
         if "{" in raw and "}" in raw:
             raw = raw[raw.find("{"): raw.rfind("}") + 1]
+        else:
+            trimmed = raw.strip().rstrip(",")
+            if trimmed:
+                raw = "{\n" + trimmed + "\n}"
 
         # Try parse
         try:
