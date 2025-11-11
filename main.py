@@ -1,14 +1,21 @@
+import os
 import requests
 from urllib.parse import urlparse
 
 from app.ingest.rss_ingest import fetch_recent_articles
 from app.extract.llm_parse import enrich_articles
 from app.resolve.domain_resolver import resolve_company_domain
-from app.resolve.find_linkedin import find_best_linkedin_url
 from app.hiring.detect_ats import detect_hiring_signal
 from app.store.upsert import upsert_company, init_db, check_articles_exist
 from app.publish.to_gsheet import save_to_sheet
 from app.publish.telegram_alerts import send_telegram_alert  # <-- ADDED
+
+ENABLE_LINKEDIN_FALLBACK = os.getenv("ENABLE_LINKEDIN_FALLBACK", "false").lower() in {"1", "true", "yes"}
+if ENABLE_LINKEDIN_FALLBACK:
+    from app.resolve.find_linkedin import find_best_linkedin_url
+else:
+    def find_best_linkedin_url(*_args, **_kwargs):
+        return None
 
 def validate_url(url: str) -> bool:
     """Returns True only if the website is reachable (status < 400)."""
@@ -81,7 +88,7 @@ def run_pipeline():
 
         merged = {**item, **resolved_entry}
 
-        if not merged.get("linkedin_url"):
+        if ENABLE_LINKEDIN_FALLBACK and not merged.get("linkedin_url"):
             domain_hint = merged.get("domain")
             domain_host = urlparse(domain_hint).netloc if domain_hint else None
             guessed_linkedin = find_best_linkedin_url(company, domain_host)
