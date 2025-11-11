@@ -1,7 +1,10 @@
 import requests
+from urllib.parse import urlparse
+
 from app.ingest.rss_ingest import fetch_recent_articles
 from app.extract.llm_parse import enrich_articles
 from app.resolve.domain_resolver import resolve_company_domain
+from app.resolve.find_linkedin import find_best_linkedin_url
 from app.hiring.detect_ats import detect_hiring_signal
 from app.store.upsert import upsert_company, init_db, check_articles_exist
 from app.publish.to_gsheet import save_to_sheet
@@ -77,6 +80,13 @@ def run_pipeline():
             resolved_entry = resolve_company_domain(company, item.get("url"))
 
         merged = {**item, **resolved_entry}
+
+        if not merged.get("linkedin_url"):
+            domain_hint = merged.get("domain")
+            domain_host = urlparse(domain_hint).netloc if domain_hint else None
+            guessed_linkedin = find_best_linkedin_url(company, domain_host)
+            if guessed_linkedin:
+                merged["linkedin_url"] = guessed_linkedin
         resolved.append(merged)
 
         print(

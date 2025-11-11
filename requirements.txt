@@ -290,5 +290,7 @@ websockets==15.0.1
 widgetsnbextension==4.0.14
 xlsxwriter==3.2.9
 xxhash==3.5.0
-yarl==1.20.1
+yarl==1.18.0
+zipp==3.21.0
+duckduckgo-search==8.1.1
 zstandard==0.25.0
